@@ -1821,17 +1821,14 @@ static int run_osnoise(void)
 
                 /* steal_time => lwexit or hwexit */
                 steal_time += is_steal_time;
-                //trace_sample_threshold(last_sample, is_steal_time, interference);
 
                 if (is_virt) {
                     /* to change qemu with virt or something similar */
                     virt += is_virt;
-                    trace_sample_threshold(last_sample, is_virt, interference);
                 }
             } else {
                 /* if no noise happened and no exit, hw noise */
                 if (!interference) {
-                    //trace_sample_threshold(last_sample, noise, interference);
                     hw_count++;
                     hw_noise += noise;
                 }
@@ -1841,8 +1838,7 @@ static int run_osnoise(void)
 				max_noise = noise;
 
 			sum_noise += noise;
-            
-            //trace_sample_threshold(last_sample, guest_noise, interference);
+            trace_sample_threshold(last_sample, guest_noise, interference);
 
 			if (osnoise_data.stop_tracing)
 				if (noise > stop_in)
