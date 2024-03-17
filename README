@@ -1,0 +1,37 @@
+Linux kernel
+============
+
+There are several guides for kernel developers and users. These guides can
+be rendered in a number of formats, like HTML and PDF. Please read
+Documentation/admin-guide/README.rst first.
+
+In order to build the documentation, use ``make htmldocs`` or
+``make pdfdocs``.  The formatted documentation can also be read online at:
+
+    https://www.kernel.org/doc/html/latest/
+
+There are various text files in the Documentation/ subdirectory,
+several of them using the Restructured Text markup notation.
+
+Please read the Documentation/process/changes.rst file, as it contains the
+requirements for building and running the kernel, and information about
+the problems which may result by upgrading your kernel.
+
+### Characterization of Virtualization Induced Noise in High Performance Computing and Real-Time Virtual Machines
+
+main branch: unchanged kernel.
+dev branch: kernel with osnoise changes.
+
+Modified files:
+
+ - arch/x86/include/asm/paravirt.h
+ - arch/x86/include/uapi/asm/kvm_para.h
+ - arch/x86/kernel/kvm.c
+ - arch/x86/kvm/x86.c
+ - include/linux/kvm_host.h
+ - include/trace/events/osnoise.h
+ - kernel/trace/trace_entries.h
+ - kernel/trace/trace_osnoise.c
+ - kernel/trace/trace_output.c
+ - usr/include/asm/kvm_para.h
+
