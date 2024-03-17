@@ -442,6 +442,7 @@ int trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry)
 {
 	char hardsoft_irq;
 	char need_resched;
+	char need_resched_lazy;
 	char irqs_off;
 	int hardirq;
 	int softirq;
@@ -462,19 +463,26 @@ int trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry)
 
 	switch (entry->flags & (TRACE_FLAG_NEED_RESCHED |
 				TRACE_FLAG_PREEMPT_RESCHED)) {
+#ifndef CONFIG_PREEMPT_LAZY
 	case TRACE_FLAG_NEED_RESCHED | TRACE_FLAG_PREEMPT_RESCHED:
 		need_resched = 'N';
 		break;
+#endif
 	case TRACE_FLAG_NEED_RESCHED:
 		need_resched = 'n';
 		break;
+#ifndef CONFIG_PREEMPT_LAZY
 	case TRACE_FLAG_PREEMPT_RESCHED:
 		need_resched = 'p';
 		break;
+#endif
 	default:
 		need_resched = '.';
 		break;
 	}
+
+	need_resched_lazy =
+		(entry->flags & TRACE_FLAG_NEED_RESCHED_LAZY) ? 'L' : '.';
 
 	hardsoft_irq =
 		(nmi && hardirq)     ? 'Z' :
@@ -484,11 +492,17 @@ int trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry)
 		softirq              ? 's' :
 		                       '.' ;
 
-	trace_seq_printf(s, "%c%c%c",
-			 irqs_off, need_resched, hardsoft_irq);
+	trace_seq_printf(s, "%c%c%c%c",
+			 irqs_off, need_resched, need_resched_lazy,
+			 hardsoft_irq);
 
 	if (entry->preempt_count & 0xf)
 		trace_seq_printf(s, "%x", entry->preempt_count & 0xf);
+	else
+		trace_seq_putc(s, '.');
+
+	if (entry->preempt_lazy_count)
+		trace_seq_printf(s, "%x", entry->preempt_lazy_count);
 	else
 		trace_seq_putc(s, '.');
 
@@ -1230,6 +1244,12 @@ trace_osnoise_print(struct trace_iterator *iter, int flags,
 			 field->max_sample);
 
 	trace_seq_printf(s, " %6u", field->hw_count);
+    /* added by me */
+    trace_seq_printf(s, " %6u", field->hw_vmexit_count);
+    trace_seq_printf(s, " %6u", field->lw_vmexit_count);
+    trace_seq_printf(s, " %10llu", field->steal_time);
+    trace_seq_printf(s, " %10llu", field->virt);
+    trace_seq_printf(s, " %10llu", field->hw_noise);
 	trace_seq_printf(s, " %6u", field->nmi_count);
 	trace_seq_printf(s, " %6u", field->irq_count);
 	trace_seq_printf(s, " %6u", field->softirq_count);
@@ -1249,11 +1269,19 @@ trace_osnoise_raw(struct trace_iterator *iter, int flags,
 
 	trace_assign_type(field, iter->ent);
 
-	trace_seq_printf(s, "%lld %llu %llu %u %u %u %u %u\n",
+	trace_seq_printf(s, "%lld %llu %llu %u %u %u %llu %llu %llu %u %u %u %u\n",
 			 field->runtime,
 			 field->noise,
 			 field->max_sample,
 			 field->hw_count,
+
+             /* added by me */
+             field->hw_vmexit_count,
+             field->lw_vmexit_count,
+             field->steal_time,
+             field->virt,
+             field->hw_noise,
+
 			 field->nmi_count,
 			 field->irq_count,
 			 field->softirq_count,

@@ -6,6 +6,9 @@
 #define _OSNOISE_TRACE_H
 
 #include <linux/tracepoint.h>
+
+/* added by me */
+#include <linux/kvm_host.h>
 TRACE_EVENT(thread_noise,
 
 	TP_PROTO(struct task_struct *t, u64 start, u64 duration),
@@ -58,6 +61,43 @@ TRACE_EVENT(softirq_noise,
 		__print_ns_to_secs(__entry->start),
 		__print_ns_without_secs(__entry->start),
 		__entry->duration)
+);
+
+TRACE_EVENT(vm_noise,
+
+        TP_PROTO(struct kvm_vcpu *vcpu, int exit_cpu, u64 exit, int entry_cpu, u64 duration, u64 exit_reason, u64 overhead),
+
+        TP_ARGS(vcpu, exit_cpu, exit, entry_cpu, duration, exit_reason, overhead),
+
+        TP_STRUCT__entry(
+            __field(     unsigned int,   vcpu_id)
+            __field(     int,            exit_cpu  )
+            __field(     u64,            exit )
+            __field(     int,            entry_cpu )
+            __field(     u64,            duration  )
+            __field(     u64,            exit_reason )
+            __field(     u64,            overhead )
+        ),
+
+        TP_fast_assign(
+            __entry->vcpu_id = vcpu->vcpu_id;
+            __entry->exit_cpu   = exit_cpu;
+            __entry->exit = exit;
+            __entry->entry_cpu = entry_cpu;
+            __entry->duration = duration;
+            __entry->exit_reason = exit_reason;
+            __entry->overhead = overhead;
+        ),
+
+        TP_printk("vm_id:%d exit_cpu:%d exit_time:%llu.%09u entry_cpu:%d duration:%llu ns exit_reason:0x%04llX overhead:%llu ns",
+            __entry->vcpu_id,
+            __entry->exit_cpu,
+            __print_ns_to_secs(__entry->exit),
+            __print_ns_without_secs(__entry->exit),
+            __entry->entry_cpu,
+            __entry->duration,
+            __entry->exit_reason,
+            __entry->overhead)
 );
 
 TRACE_EVENT(irq_noise,

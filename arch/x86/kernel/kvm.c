@@ -178,7 +178,7 @@ static void apf_task_wake_all(void)
 		struct hlist_node *p, *next;
 
 		raw_spin_lock(&b->lock);
-		hlist_for_each_safe(p, next, &b->list) {
+        hlist_for_each_safe(p, next, &b->list) {
 			n = hlist_entry(p, typeof(*n), link);
 			if (n->cpu == smp_processor_id())
 				apf_task_wake_one(n);
@@ -415,6 +415,38 @@ static u64 kvm_steal_clock(int cpu)
 	} while ((version & 1) || (version != src->version));
 
 	return steal;
+}
+
+/* added by me */
+u32 kvm_lwexit_count(int cpu) {
+    u32 count;
+    struct kvm_steal_time *src;
+    int version;
+    src = &per_cpu(steal_time, cpu);
+
+    do {
+        version = src->version;
+        virt_rmb();
+        count = src->count[0];
+        virt_rmb();
+    } while((version & 1) || (version != src->version));
+
+    return count;
+}
+
+u32 kvm_hwexit_count(int cpu) {
+    u32 count;
+    struct kvm_steal_time *src;
+    int version;
+    src = &per_cpu(steal_time, cpu);
+    do {
+        version = src->version;
+        virt_rmb();
+        count = src->count[1];
+        virt_rmb();
+    } while((version & 1) || (version != src->version));
+
+    return count;
 }
 
 static inline void __set_percpu_decrypted(void *ptr, unsigned long size)
@@ -819,6 +851,10 @@ static void __init kvm_guest_init(void)
 	if (kvm_para_has_feature(KVM_FEATURE_STEAL_TIME)) {
 		has_steal_clock = 1;
 		static_call_update(pv_steal_clock, kvm_steal_clock);
+
+        /* added by me */
+        static_call_update(pv_lwexit_count, kvm_lwexit_count);
+        static_call_update(pv_hwexit_count, kvm_hwexit_count);
 
 		pv_ops.lock.vcpu_is_preempted =
 			PV_CALLEE_SAVE(__kvm_vcpu_is_preempted);

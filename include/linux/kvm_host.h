@@ -41,7 +41,6 @@
 #include <linux/kvm_para.h>
 
 #include <linux/kvm_types.h>
-
 #include <asm/kvm_host.h>
 #include <linux/kvm_dirty_ring.h>
 
@@ -390,6 +389,13 @@ struct kvm_vcpu {
 	 */
 	struct kvm_memory_slot *last_used_slot;
 	u64 last_used_slot_gen;
+
+    /* added by me */
+    u32 vm_exit_delta;
+    int exit_cpu;
+    u64 exit_time;
+    u32 exit_reason;
+    struct hlist_node node;
 };
 
 /*

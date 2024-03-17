@@ -26,6 +26,14 @@
 #include <linux/sched.h>
 #include "trace.h"
 
+/* added by me */
+#include <asm/paravirt.h>
+#include <linux/kvm_host.h>
+#include <linux/hashtable.h>
+/* TO FIX THIS IMPORT */
+#include "../../arch/x86/kvm/trace.h"
+#include <linux/types.h>
+
 #ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/trace/irq_vectors.h>
 #undef TRACE_INCLUDE_PATH
@@ -47,6 +55,7 @@
 
 #define DEFAULT_TIMERLAT_PERIOD	1000			/* 1ms */
 #define DEFAULT_TIMERLAT_PRIO	95			/* FIFO 95 */
+
 
 /*
  * osnoise/options entries.
@@ -181,6 +190,7 @@ struct osn_irq {
 
 #define IRQ_CONTEXT	0
 #define THREAD_CONTEXT	1
+#define HASH_DIM        32
 /*
  * sofirq runtime info.
  */
@@ -189,6 +199,18 @@ struct osn_softirq {
 	u64	arrival_time;
 	u64	delta_start;
 };
+
+/* added by me */
+#ifdef CONFIG_KVM
+struct osn_vm {
+    u64 exit_time;
+    u64 delta_overhead;
+    u64 exit_reason;
+    int exit_cpu;
+    int not_descheduled;
+    struct kvm_vcpu *vcpu;
+};
+#endif
 
 /*
  * thread runtime info.
@@ -210,9 +232,20 @@ struct osnoise_variables {
 	struct osn_nmi		nmi;
 	struct osn_irq		irq;
 	struct osn_softirq	softirq;
+
+    /* added by me */
+#ifdef CONFIG_KVM
+    	struct osn_vm       vm;
+#endif
 	struct osn_thread	thread;
 	local_t			int_counter;
 };
+
+
+/*
+ * Hash table to map current task to vCPU
+ */
+DECLARE_HASHTABLE(task_to_vcpu, 3);
 
 /*
  * Per-cpu runtime information.
@@ -310,8 +343,14 @@ struct osnoise_sample {
 	u64			runtime;	/* runtime */
 	u64			noise;		/* noise */
 	u64			max_sample;	/* max single noise sample */
-	int			hw_count;	/* # HW (incl. hypervisor) interference */
-	int			nmi_count;	/* # NMIs during this sample */
+	int			hw_count;	/* # HW interference */
+    /* added by me */
+    int         lw_vmexit_count; /* vm exits handled by KVM */
+    int         hw_vmexit_count; /* vm exits passing through QEMU */
+    u64         steal_time; /* time vm spent descheduled */
+    u64         virt;       /* time spent in QEMU */
+    u64         hw_noise;   /* HW noise in us */
+    int			nmi_count;	/* # NMIs during this sample */
 	int			irq_count;	/* # IRQs during this sample */
 	int			softirq_count;	/* # softirqs during this sample */
 	int			thread_count;	/* # threads during this sample */
@@ -435,13 +474,13 @@ static void print_osnoise_headers(struct seq_file *s)
 	seq_puts(s, "                    SINGLE      Interference counters:\n");
 
 	seq_puts(s, "#                              |||||||               RUNTIME   ");
-	seq_puts(s, "   NOISE  %% OF CPU  NOISE    +-----------------------------+\n");
+	seq_puts(s, "   NOISE  %% OF CPU  NOISE    +---------------------------------------------------------------------------+\n");
 
 	seq_puts(s, "#           TASK-PID      CPU# |||||||   TIMESTAMP    IN US    ");
-	seq_puts(s, "   IN US  AVAILABLE  IN US     HW    NMI    IRQ   SIRQ THREAD\n");
+	seq_puts(s, "   IN US  AVAILABLE  IN US     HW   HW_EX   LW_EX   STEAL         VIRT  HW_NOISE   NMI    IRQ   SIRQ THREAD\n");
 
-	seq_puts(s, "#              | |         |   |||||||      |           |      ");
-	seq_puts(s, "       |    |            |      |      |      |      |      |\n");
+	seq_puts(s, "#              | |         |   |||||||       |          |      ");
+	seq_puts(s, "     |    |            |        |     |       |       |            |       |        |      |     |     |\n");
 }
 #else /* CONFIG_PREEMPT_RT */
 static void print_osnoise_headers(struct seq_file *s)
@@ -459,13 +498,13 @@ static void print_osnoise_headers(struct seq_file *s)
 	seq_puts(s, "                    SINGLE      Interference counters:\n");
 
 	seq_puts(s, "#                              |||||               RUNTIME   ");
-	seq_puts(s, "   NOISE  %% OF CPU  NOISE    +-----------------------------+\n");
+	seq_puts(s, "   NOISE  %% OF CPU  NOISE    +---------------------------------------------------------------------------+\n");
 
 	seq_puts(s, "#           TASK-PID      CPU# |||||   TIMESTAMP    IN US    ");
-	seq_puts(s, "   IN US  AVAILABLE  IN US     HW    NMI    IRQ   SIRQ THREAD\n");
+	seq_puts(s, "   IN US  AVAILABLE  IN US     HW   HW_EX   LW_EX   STEAL         VIRT  HW_NOISE   NMI    IRQ   SIRQ THREAD\n");
 
-	seq_puts(s, "#              | |         |   |||||      |           |      ");
-	seq_puts(s, "       |    |            |      |      |      |      |      |\n");
+	seq_puts(s, "#              | |         |   |||||          |          |      ");
+	seq_puts(s, "       |    |          |        |     |        |      |             |      |        |      |     |     |\n");
 }
 #endif /* CONFIG_PREEMPT_RT */
 
@@ -504,6 +543,12 @@ __trace_osnoise_sample(struct osnoise_sample *sample, struct trace_buffer *buffe
 	entry->noise		= sample->noise;
 	entry->max_sample	= sample->max_sample;
 	entry->hw_count		= sample->hw_count;
+    /* added by me */
+    entry->hw_vmexit_count = sample->hw_vmexit_count;
+    entry->lw_vmexit_count = sample->lw_vmexit_count;
+    entry->steal_time = sample->steal_time;
+    entry->virt = sample->virt;
+    entry->hw_noise = sample->hw_noise;
 	entry->nmi_count	= sample->nmi_count;
 	entry->irq_count	= sample->irq_count;
 	entry->softirq_count	= sample->softirq_count;
@@ -719,6 +764,7 @@ cond_move_irq_delta_start(struct osnoise_variables *osn_var, u64 duration)
 {
 	if (osn_var->irq.delta_start)
 		osn_var->irq.delta_start += duration;
+
 }
 
 #ifndef CONFIG_PREEMPT_RT
@@ -735,10 +781,26 @@ cond_move_softirq_delta_start(struct osnoise_variables *osn_var, u64 duration)
 {
 	if (osn_var->softirq.delta_start)
 		osn_var->softirq.delta_start += duration;
+
+    /* added by me */
 }
 #else /* CONFIG_PREEMPT_RT */
 #define cond_move_softirq_delta_start(osn_var, duration) do {} while (0)
 #endif
+
+/* added by me 
+ * cond_move_vm_delta_start - Forward the delta_start of a running vm.
+ *
+ * If a vm is preempted by an IRQ or an NMI or softirq, its delta_overhead is pushed
+ * forward to discount the interference.
+ *
+ */
+static inline void
+cond_move_vm_delta_start(struct osnoise_variables *osn_var, u64 duration)
+{
+    if (osn_var->vm.delta_overhead)
+        osn_var->vm.delta_overhead += duration;
+}
 
 /*
  * cond_move_thread_delta_start - Forward the delta_start of a running thread
@@ -753,6 +815,7 @@ cond_move_thread_delta_start(struct osnoise_variables *osn_var, u64 duration)
 {
 	if (osn_var->thread.delta_start)
 		osn_var->thread.delta_start += duration;
+
 }
 
 /*
@@ -782,11 +845,12 @@ cond_move_thread_delta_start(struct osnoise_variables *osn_var, u64 duration)
  * A counter of interrupts is used. If the counter increased, try
  * to capture an interference safe duration.
  */
+
 static inline s64
 get_int_safe_duration(struct osnoise_variables *osn_var, u64 *delta_start)
 {
+    s64 duration;
 	u64 int_counter, now;
-	s64 duration;
 
 	do {
 		int_counter = local_read(&osn_var->int_counter);
@@ -807,10 +871,10 @@ get_int_safe_duration(struct osnoise_variables *osn_var, u64 *delta_start)
 	if (duration < 0)
 		osnoise_taint("Negative duration!\n");
 
-	*delta_start = 0;
-
-	return duration;
+    return duration;
 }
+
+
 
 /*
  *
@@ -821,8 +885,9 @@ get_int_safe_duration(struct osnoise_variables *osn_var, u64 *delta_start)
  *
  * See get_int_safe_duration() for an explanation.
  */
+
 static u64
-set_int_safe_time(struct osnoise_variables *osn_var, u64 *time)
+set_int_safe_time_host(struct osnoise_variables *osn_var, u64 *start, u64 *overhead)
 {
 	u64 int_counter;
 
@@ -831,13 +896,83 @@ set_int_safe_time(struct osnoise_variables *osn_var, u64 *time)
 		/* synchronize with interrupts */
 		barrier();
 
-		*time = time_get();
+		*start = time_get();
+        *overhead = time_get();
 
 		/* synchronize with interrupts */
 		barrier();
 	} while (int_counter != local_read(&osn_var->int_counter));
 
 	return int_counter;
+}
+
+static u64 
+set_int_safe_time(struct osnoise_variables *osn_var, u64 *time)
+{
+    u64 int_counter;
+
+    int cpu = get_cpu();
+
+    do {
+        int_counter = local_read(&osn_var->int_counter);
+
+        /* synchronize with interrupts */
+        barrier();
+
+        *time = time_get();
+
+    } while (int_counter != local_read(&osn_var->int_counter));
+
+    put_cpu();
+
+    return int_counter;
+}
+
+
+static u64
+set_int_safe_run_osnoise(struct osnoise_variables *osn_var, u64 *time, u64 *steal_time, u32 *lwexit, u32 *hwexit)
+{
+    u64 int_counter;
+    u32 lw_counter = 0;
+    u32 hw_counter = 0;
+
+
+    int cpu = get_cpu();
+
+    do {
+        int_counter = local_read(&osn_var->int_counter);
+
+        if (static_key_false(&paravirt_steal_enabled)) {
+            lw_counter = paravirt_lwexit_count(cpu);
+            hw_counter = paravirt_hwexit_count(cpu);
+        }
+
+        /* synchronize with interrupts */
+        barrier();
+
+        *time = time_get(); 
+
+        if (static_key_false(&paravirt_steal_enabled)) {
+                *steal_time = paravirt_steal_clock(cpu);
+
+                /* synchronize with interrupts */
+                barrier();
+                *lwexit = paravirt_lwexit_count(cpu);
+                *hwexit = paravirt_hwexit_count(cpu);
+        }
+        else {
+            *steal_time = 0;
+
+            /* synchronize with interrupts */
+            barrier();
+            *lwexit = 0;
+            *hwexit = 0;
+        }
+    } while (int_counter != local_read(&osn_var->int_counter) || lw_counter != *lwexit || hw_counter != *hwexit);
+
+    put_cpu();
+
+    return int_counter;
 }
 
 #ifdef CONFIG_TIMERLAT_TRACER
@@ -888,14 +1023,18 @@ void trace_osnoise_callback(bool enter)
 		if (enter) {
 			osn_var->nmi.delta_start = time_get();
 			local_inc(&osn_var->int_counter);
+
 		} else {
 			duration = time_get() - osn_var->nmi.delta_start;
 
 			trace_nmi_noise(osn_var->nmi.delta_start, duration);
-
 			cond_move_irq_delta_start(osn_var, duration);
 			cond_move_softirq_delta_start(osn_var, duration);
 			cond_move_thread_delta_start(osn_var, duration);
+#ifdef CONFIG_KVM
+            cond_move_vm_delta_start(osn_var, duration);
+#endif
+
 		}
 	}
 
@@ -923,9 +1062,8 @@ void osnoise_trace_irq_entry(int id)
 	 * the execution time, so it is safe to get it unsafe.
 	 */
 	osn_var->irq.arrival_time = time_get();
-	set_int_safe_time(osn_var, &osn_var->irq.delta_start);
+    set_int_safe_time(osn_var, &osn_var->irq.delta_start);
 	osn_var->irq.count++;
-
 	local_inc(&osn_var->int_counter);
 }
 
@@ -942,12 +1080,16 @@ void osnoise_trace_irq_exit(int id, const char *desc)
 
 	if (!osn_var->sampling)
 		return;
+    duration = get_int_safe_duration(osn_var, &osn_var->irq.delta_start);
 
-	duration = get_int_safe_duration(osn_var, &osn_var->irq.delta_start);
 	trace_irq_noise(id, desc, osn_var->irq.arrival_time, duration);
 	osn_var->irq.arrival_time = 0;
 	cond_move_softirq_delta_start(osn_var, duration);
 	cond_move_thread_delta_start(osn_var, duration);
+
+#ifdef CONFIG_KVM
+    cond_move_vm_delta_start(osn_var, duration);
+#endif
 }
 
 /*
@@ -1054,7 +1196,7 @@ static void trace_softirq_entry_callback(void *data, unsigned int vec_nr)
 	 * the execution time, so it is safe to get it unsafe.
 	 */
 	osn_var->softirq.arrival_time = time_get();
-	set_int_safe_time(osn_var, &osn_var->softirq.delta_start);
+    set_int_safe_time(osn_var, &osn_var->softirq.delta_start);
 	osn_var->softirq.count++;
 
 	local_inc(&osn_var->int_counter);
@@ -1077,11 +1219,24 @@ static void trace_softirq_exit_callback(void *data, unsigned int vec_nr)
 	if (unlikely(timerlat_enabled()))
 		if (!timerlat_softirq_exit(osn_var))
 			return;
+    duration = get_int_safe_duration(osn_var, &osn_var->softirq.delta_start);
+    /* added by me */
+    /*
+    *
+    * Register steal time at softirq exit, compute the overall steal time spent
+    * due to the softirq and subtract it from the softirq duration --> obtain the time
+    * spent in the guest by the softirq.
+    * Then add it to the guest_noise runtime variable.
+    *
+    */
 
-	duration = get_int_safe_duration(osn_var, &osn_var->softirq.delta_start);
 	trace_softirq_noise(vec_nr, osn_var->softirq.arrival_time, duration);
-	cond_move_thread_delta_start(osn_var, duration);
+	cond_move_thread_delta_start(osn_var, duration, delta_steal_time);
 	osn_var->softirq.arrival_time = 0;
+#ifdef CONFIG_KVM
+    cond_move_vm_delta_start(osn_var, duration);
+#endif
+
 }
 
 /*
@@ -1134,6 +1289,151 @@ static void unhook_softirq_events(void)
 }
 #endif
 
+/* added by me 
+ * host-entry - Record a vm_exit event
+ *
+ */
+
+#ifdef CONFIG_KVM
+static void trace_host_entry_callback(void *data, struct kvm_vcpu *vcpu, u32 isa)
+{
+    struct osnoise_variables *osn_var = this_cpu_osn_var();
+    unsigned cpu;
+
+    /* to store exit reason infos */
+    // TO CHANGE WITH 5 VARIABLES 
+    u64 info[5];
+
+    if (!osn_var->sampling)
+        return;
+
+    /* get the exit time of the vm */
+    /* osn_var->vm.exit_time = time_get(); */
+
+    static_call(kvm_x86_get_exit_info)(vcpu, (u32 *)&info[0], &info[1],
+                        &info[2], (u32 *)&info[3],
+                        (u32 *)&info[4]);
+    
+    /* get the vmexit reason */
+    /*osn_var->vm.exit_reason = vcpu->run->exit_reason;*/
+    osn_var->vm.exit_reason = info[0];
+
+    /* cpu i am exiting from */
+    cpu = get_cpu();
+    osn_var->vm.exit_cpu = cpu;
+    put_cpu();
+
+    /* set not descheduled exit flag */
+    osn_var->vm.not_descheduled = 1;
+    
+
+    /* 
+     * set the exit time, and delta_overhead equal to the time at which the vm exit
+     * happens plus possible noise given by higher-priority events in case of the overhead
+     */ 
+    set_int_safe_time_host(osn_var, &osn_var->vm.exit_time, &osn_var->vm.delta_overhead);
+    osn_var->vm.vcpu = vcpu;
+}
+
+DEFINE_RAW_SPINLOCK(vcpu_map_lock);
+
+/*
+ *
+ * host_exit - Report a vmentry event
+ *
+ */
+static void trace_host_exit_callback(void *data, struct kvm_vcpu *vcpu)
+{
+    struct osnoise_variables *osn_var = this_cpu_osn_var();
+    s64 overhead;
+    s64 duration;
+    s64 vm_entry_delta;
+    int entry_cpu;
+    int exit_cpu;
+    u64 exit_time;
+    u32 exit_reason;
+    
+    if (!osn_var->sampling)
+        return;
+
+    /* time between sched-in and vmentry */
+    vm_entry_delta = get_int_safe_duration(osn_var, &osn_var->vm.delta_overhead);
+
+    /* cpu i am entering in */
+    entry_cpu = get_cpu();
+
+    /* if not the first time the vm_entry happens */
+    if (osn_var->vm.vcpu) {
+
+        /* if not handled just by kvm */
+        if (!osn_var->vm.not_descheduled) {
+
+            exit_cpu = osn_var->vm.vcpu->exit_cpu;
+            exit_time = osn_var->vm.vcpu->exit_time;
+            exit_reason = osn_var->vm.vcpu->exit_reason;
+            duration = get_int_safe_duration(osn_var, &osn_var->vm.vcpu->exit_time);
+            overhead = osn_var->vm.vcpu->vm_exit_delta + vm_entry_delta;
+        }
+
+        /* lightweight exit */
+        else {
+            exit_cpu = osn_var->vm.exit_cpu;
+            exit_time = osn_var->vm.exit_time;
+            exit_reason = osn_var->vm.exit_reason;
+            duration = get_int_safe_duration(osn_var, &osn_var->vm.exit_time);
+            overhead = vm_entry_delta;
+        }      
+    } 
+    else {
+        overhead = vm_entry_delta;
+        duration = vm_entry_delta;
+    }
+    /*
+     *
+     * Traces:
+     * - the overhead between vm_exit and sched_out, sched_in and vm_entry
+     * - the duration of the vmexit (time between vmentry and vmexit)
+     * - physical cpu migration of vm
+     * - vmexit reason
+     */
+    trace_vm_noise(vcpu, exit_cpu, exit_time, entry_cpu, duration, exit_reason, overhead);
+
+    put_cpu();
+}
+
+/*
+ * This function hooks the vm related callback to the respective trace events
+ *
+ */
+static int hook_vm_events(void)
+{
+    int ret;
+    ret = register_trace_kvm_entry(trace_host_exit_callback, NULL);
+    if (ret)
+        goto out_err;
+    ret = register_trace_kvm_exit(trace_host_entry_callback, NULL);
+    if (ret)
+        goto out_unreg_entry;
+    return 0;
+out_unreg_entry:
+    unregister_trace_kvm_entry(trace_host_exit_callback, NULL);
+out_err:
+    return -EINVAL;
+}
+
+/*
+ * unhook_vm_events - Unhook vm handling events
+ *
+ * This function hooks the vm related callback to th respective trace events
+ *
+ */
+static void unhook_vm_events(void)
+{
+    unregister_trace_kvm_entry(trace_host_exit_callback, NULL);
+    unregister_trace_kvm_exit(trace_host_entry_callback, NULL);
+}
+#endif
+
 /*
  * thread_entry - Record the starting of a thread noise window
  *
@@ -1150,11 +1450,51 @@ thread_entry(struct osnoise_variables *osn_var, struct task_struct *t)
 	 * the execution time, so it is safe to get it unsafe.
 	 */
 	osn_var->thread.arrival_time = time_get();
-
-	set_int_safe_time(osn_var, &osn_var->thread.delta_start);
-
 	osn_var->thread.count++;
+
+    set_int_safe_time(osn_var, &osn_var->thread.delta_start);
+#ifdef CONFIG_KVM
+    /* added by me */
+
+    /*
+     *
+     * Get the vCPU associated to the running task in the hash table, if present
+     * and associate it to the osn_var->vm.vcpu.
+     * Needed to retrieve the vm_exit_delta of the vcpu in case of migration after sched_out.
+     *
+     */
+    struct kvm_vcpu *cur;
+    /*
+    * osnoise->vm.vcpu = lookup current
+    */
+
+    rcu_read_lock();
+    hash_for_each_possible_rcu(task_to_vcpu, cur, node, t->pid){
+        if (!(cur->pid == t->thread_pid))
+            continue;
+
+        if (cur->pid == t->thread_pid) {
+            osn_var->vm.vcpu = cur;
+            break;
+        }
+    }
+    rcu_read_unlock();
+
+    /* if an entry in the hash table has been found */
+    if (osn_var->vm.vcpu) {
+        /* delete the entry from the hash table */
+        raw_spin_lock(&vcpu_map_lock);
+        hash_del_rcu(&osn_var->vm.vcpu->node);
+        raw_spin_unlock(&vcpu_map_lock);
+        
+        /* set the delta_start of the vm to the time at which sched-in happens */
+        osn_var->vm.delta_overhead = osn_var->thread.delta_start;
+
+   }
+#endif
+
 	local_inc(&osn_var->int_counter);
+
 }
 
 /*
@@ -1173,11 +1513,45 @@ thread_exit(struct osnoise_variables *osn_var, struct task_struct *t)
 	if (unlikely(timerlat_enabled()))
 		if (!timerlat_thread_exit(osn_var))
 			return;
+    
+    duration = get_int_safe_duration(osn_var, &osn_var->thread.delta_start);
 
-	duration = get_int_safe_duration(osn_var, &osn_var->thread.delta_start);
+#ifdef CONFIG_KVM
+
+    /* added by me */
+    /*
+     *
+     * Get the overhead introduced by KVM between vm_exit and sched_out
+     * and associate the exiting vcpu to the task scheded-out.
+     * Needed in case of migration of the exiting task.
+     *
+     */
+    if (osn_var->vm.vcpu) {
+
+        /* obtain infos saved at vmexit */
+        osn_var->vm.vcpu->vm_exit_delta = get_int_safe_duration(osn_var, &osn_var->vm.delta_overhead);
+        osn_var->vm.vcpu->exit_cpu = osn_var->vm.exit_cpu;
+        osn_var->vm.vcpu->exit_reason = osn_var->vm.exit_reason;
+        osn_var->vm.vcpu->exit_time = osn_var->vm.exit_time;
+
+        /* vcpu descheduled */
+        osn_var->vm.not_descheduled = 0;
+
+        /*
+         * map current to vcpu
+        */
+
+        raw_spin_lock(&vcpu_map_lock);
+    
+        hash_add_rcu(task_to_vcpu, &osn_var->vm.vcpu->node, t->pid);
+    
+        raw_spin_unlock(&vcpu_map_lock);
+        osn_var->vm.vcpu = NULL;
+    }
+
+#endif
 
 	trace_thread_noise(t, osn_var->thread.arrival_time, duration);
-
 	osn_var->thread.arrival_time = 0;
 }
 
@@ -1327,6 +1701,21 @@ static int run_osnoise(void)
 	u64 sum_noise = 0;
 	int hw_count = 0;
 	int ret = -1;
+    /* added by me */
+    u64 hw_noise = 0;
+
+    /* added by me */
+    u64 last_steal, steal;
+    u32 last_lwexit, lwexit;
+    u32 last_hwexit, hwexit;
+    u32 is_steal_time = 0;
+    s32 is_virt = 0;
+    u32 is_lwexit, is_hwexit = 0;
+    int hw_vmexit_count = 0;
+    int lw_vmexit_count = 0;
+    u64 steal_time = 0;
+    u64 virt = 0;
+
 
 	/*
 	 * Disabling preemption is only required if IRQs are enabled,
@@ -1376,16 +1765,18 @@ static int run_osnoise(void)
 	 */
 	start = time_get();
 
-	/*
-	 * "previous" loop.
-	 */
-	last_int_count = set_int_safe_time(osn_var, &last_sample);
+    /* 
+     * "previous" loop.
+     */
+
+    last_int_count = set_int_safe_run_osnoise(osn_var, &last_sample, &last_steal, &last_lwexit, &last_hwexit);
 
 	do {
-		/*
-		 * Get sample!
-		 */
-		int_count = set_int_safe_time(osn_var, &sample);
+
+        /*
+         * Get sample!
+         */
+        int_count = set_int_safe_run_osnoise(osn_var, &sample, &steal, &lwexit, &hwexit);
 
 		noise = time_sub(sample, last_sample);
 
@@ -1415,15 +1806,43 @@ static int run_osnoise(void)
 		if (noise >= threshold) {
 			int interference = int_count - last_int_count;
 
+            /* added by me */
+            is_steal_time = steal - last_steal;
+            is_virt = noise - is_steal_time;
+            is_lwexit = lwexit - last_lwexit;
+            is_hwexit = hwexit - last_hwexit;
+
+
+            /* if light or heavy exit happens */
+            if (is_lwexit || is_hwexit) {
+                /* just one of the two can be updated at each iteration */
+                lw_vmexit_count += is_lwexit;
+                hw_vmexit_count += is_hwexit;
+
+                /* steal_time => lwexit or hwexit */
+                steal_time += is_steal_time;
+                //trace_sample_threshold(last_sample, is_steal_time, interference);
+
+                if (is_virt) {
+                    /* to change qemu with virt or something similar */
+                    virt += is_virt;
+                    trace_sample_threshold(last_sample, is_virt, interference);
+                }
+            } else {
+                /* if no noise happened and no exit, hw noise */
+                if (!interference) {
+                    //trace_sample_threshold(last_sample, noise, interference);
+                    hw_count++;
+                    hw_noise += noise;
+                }
+            }
+
 			if (noise > max_noise)
 				max_noise = noise;
 
-			if (!interference)
-				hw_count++;
-
 			sum_noise += noise;
-
-			trace_sample_threshold(last_sample, noise, interference);
+            
+            //trace_sample_threshold(last_sample, guest_noise, interference);
 
 			if (osnoise_data.stop_tracing)
 				if (noise > stop_in)
@@ -1461,8 +1880,12 @@ static int run_osnoise(void)
 		if (!disable_irq && !disable_preemption)
 			cond_resched();
 
-		last_sample = sample;
+        /* added by me */
+        last_lwexit = lwexit;
+        last_hwexit = hwexit;
+        last_steal = steal;
 		last_int_count = int_count;
+        last_sample = sample;
 
 	} while (total < runtime && !kthread_should_stop());
 
@@ -1470,7 +1893,6 @@ static int run_osnoise(void)
 	 * Finish the above in the view for interrupts.
 	 */
 	barrier();
-
 	osn_var->sampling = false;
 
 	/*
@@ -1495,12 +1917,19 @@ static int run_osnoise(void)
 	s.max_sample = time_to_us(max_noise);
 	s.hw_count = hw_count;
 
+    /* added by me */
+    s.lw_vmexit_count = lw_vmexit_count;
+    s.hw_vmexit_count = hw_vmexit_count;
+    s.steal_time = time_to_us(steal_time);
+    s.virt = time_to_us(virt);
+    s.hw_noise = time_to_us(hw_noise);
+
 	/* Save interference stats info */
 	diff_osn_sample_stats(osn_var, &s);
 
 	trace_osnoise_sample(&s);
 
-	notify_new_max_latency(max_noise);
+	//notify_new_max_latency(max_noise);
 
 	if (osnoise_data.stop_tracing_total)
 		if (s.noise > osnoise_data.stop_tracing_total)
@@ -2385,6 +2814,11 @@ static int osnoise_hook_events(void)
 	if (retval)
 		goto out_unhook_irq;
 
+    /* added by me */
+#ifdef CONFIG_KVM
+    retval = hook_vm_events();
+#endif
+
 	retval = hook_thread_events();
 	/*
 	 * All fine!
@@ -2402,6 +2836,10 @@ static void osnoise_unhook_events(void)
 {
 	unhook_thread_events();
 	unhook_softirq_events();
+    /* added by me */
+#ifdef CONFIG_KVM
+    unhook_vm_events();
+#endif
 	unhook_irq_events();
 }
 
@@ -2659,6 +3097,10 @@ __init static int init_osnoise_tracer(void)
 
 	INIT_LIST_HEAD_RCU(&osnoise_instances);
 
+    /* added by me, initialize the hash table */
+#ifdef CONFIG_KVM
+    hash_init(task_to_vcpu);
+#endif
 	init_tracefs();
 
 	return 0;

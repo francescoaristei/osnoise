@@ -65,11 +65,16 @@ struct kvm_steal_time {
 	__u32 flags;
 	__u8  preempted;
 	__u8  u8_pad[3];
-	__u32 pad[11];
+    /* added by me */
+    __u32 count[2];
+    /* reduced from 11 to 9 */
+	__u32 pad[9];
 };
 
 #define KVM_VCPU_PREEMPTED          (1 << 0)
 #define KVM_VCPU_FLUSH_TLB          (1 << 1)
+/* added by me */
+#define KVM_VCPU_COUNT_VALID        (1 << 0)
 
 #define KVM_CLOCK_PAIRING_WALLCLOCK 0
 struct kvm_clock_pairing {

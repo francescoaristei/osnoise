@@ -3461,7 +3461,7 @@ void kvm_service_local_tlb_flush_requests(struct kvm_vcpu *vcpu)
 }
 EXPORT_SYMBOL_GPL(kvm_service_local_tlb_flush_requests);
 
-static void record_steal_time(struct kvm_vcpu *vcpu)
+static void record_steal_time(struct kvm_vcpu *vcpu, int exit_type)
 {
 	struct gfn_to_hva_cache *ghc = &vcpu->arch.st.cache;
 	struct kvm_steal_time __user *st;
@@ -3469,6 +3469,11 @@ static void record_steal_time(struct kvm_vcpu *vcpu)
 	gpa_t gpa = vcpu->arch.st.msr_val & KVM_STEAL_VALID_BITS;
 	u64 steal;
 	u32 version;
+
+    /* added by me */
+    u32 lw_count;
+    u32 hw_count;
+    u32 enable_count;
 
 	if (kvm_xen_msr_enabled(vcpu->kvm)) {
 		kvm_xen_runstate_set_running(vcpu);
@@ -3549,6 +3554,25 @@ static void record_steal_time(struct kvm_vcpu *vcpu)
 		vcpu->arch.st.last_steal;
 	vcpu->arch.st.last_steal = current->sched_info.run_delay;
 	unsafe_put_user(steal, &st->steal, out);
+
+    /* added by me */
+    unsafe_get_user(enable_count, &st->flags, out);
+    if (!(enable_count & KVM_VCPU_COUNT_VALID)) {
+        enable_count = 1;
+        unsafe_put_user(enable_count, &st->flags, out);
+    }
+
+    if (exit_type) {
+        unsafe_get_user(lw_count, &st->count[0], out);
+        lw_count += 1;
+        unsafe_put_user(lw_count, &st->count[0], out);
+    }
+
+    else {
+        unsafe_get_user(hw_count, &st->count[1], out);
+        hw_count += 1;
+        unsafe_put_user(hw_count, &st->count[1], out);
+    }
 
 	version += 1;
 	unsafe_put_user(version, &st->version, out);
@@ -10319,7 +10343,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 			goto out;
 		}
 		if (kvm_check_request(KVM_REQ_STEAL_UPDATE, vcpu))
-			record_steal_time(vcpu);
+			record_steal_time(vcpu, 0);
 #ifdef CONFIG_KVM_SMM
 		if (kvm_check_request(KVM_REQ_SMI, vcpu))
 			process_smi(vcpu);
@@ -10600,6 +10624,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	if (vcpu->arch.apic_attention)
 		kvm_lapic_sync_from_vapic(vcpu);
 
+    record_steal_time(vcpu, 1);
 	r = static_call(kvm_x86_handle_exit)(vcpu, exit_fastpath);
 	return r;
 

@@ -370,16 +370,29 @@ FTRACE_ENTRY(osnoise, osnoise_entry,
 		__field(	u64,			runtime		)
 		__field(	u64,			max_sample	)
 		__field(	unsigned int,		hw_count	)
-		__field(	unsigned int,		nmi_count	)
-		__field(	unsigned int,		irq_count	)
+        /* added by me */
+        __field(    u32,                hw_vmexit_count )
+        __field(    u32,                lw_vmexit_count )
+        __field(    u64,                steal_time      )
+        __field(    u64,                virt            )
+        __field(    u64,                hw_noise        )
+		__field(	unsigned int,		nmi_count	    )
+		__field(	unsigned int,		irq_count	    )
 		__field(	unsigned int,		softirq_count	)
 		__field(	unsigned int,		thread_count	)
 	),
 
-	F_printk("noise:%llu\tmax_sample:%llu\thw:%u\tnmi:%u\tirq:%u\tsoftirq:%u\tthread:%u\n",
+    /* added by me */
+	F_printk("noise:%llu\tmax_sample:%llu\thw:%u\thwvmexit:%u\tlwvmexit:%u\tsteal:%llu\tvirt:%llu\thwnoise:%llu\tnmi:%u\tirq:%u\tsoftirq:%u\tthread:%u\n",
 		 __entry->noise,
 		 __entry->max_sample,
 		 __entry->hw_count,
+         /* added by me */
+         __entry->hw_vmexit_count,
+         __entry->lw_vmexit_count,
+         __entry->steal_time,
+         __entry->virt,
+         __entry->hw_noise,
 		 __entry->nmi_count,
 		 __entry->irq_count,
 		 __entry->softirq_count,

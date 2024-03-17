@@ -20,9 +20,16 @@
 
 u64 dummy_steal_clock(int cpu);
 u64 dummy_sched_clock(void);
+/* added by me */
+u32 dummy_lwexit_count(int cpu);
+u32 dummy_hwexit_count(int cpu);
 
 DECLARE_STATIC_CALL(pv_steal_clock, dummy_steal_clock);
 DECLARE_STATIC_CALL(pv_sched_clock, dummy_sched_clock);
+
+/* added by me */
+DECLARE_STATIC_CALL(pv_lwexit_count, dummy_lwexit_count);
+DECLARE_STATIC_CALL(pv_hwexit_count, dummy_hwexit_count);
 
 void paravirt_set_sched_clock(u64 (*func)(void));
 
@@ -43,6 +50,17 @@ bool pv_is_native_vcpu_is_preempted(void);
 static inline u64 paravirt_steal_clock(int cpu)
 {
 	return static_call(pv_steal_clock)(cpu);
+}
+
+/* added by me */
+static inline u32 paravirt_lwexit_count(int cpu)
+{
+    return static_call(pv_lwexit_count)(cpu);
+}
+
+static inline u32 paravirt_hwexit_count(int cpu)
+{
+    return static_call(pv_hwexit_count)(cpu);
 }
 
 #ifdef CONFIG_PARAVIRT_SPINLOCKS
